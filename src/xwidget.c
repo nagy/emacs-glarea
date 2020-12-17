@@ -47,6 +47,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #ifdef HAVE_XINPUT2
 #include <X11/extensions/XInput2.h>
 #endif
+#include <epoxy/gl.h>
+#include <GL/glx.h>
+#include <GL/glu.h>
 #elif defined NS_IMPL_COCOA
 #include "nsxwidget.h"
 #endif
@@ -286,6 +289,7 @@ If BUFFER is a string and no such buffer exists, create it.
 TYPE is a symbol which can take one of the following values:
 
 - webkit
+- glarea
 
 RELATED is nil, or an xwidget.  When constructing a WebKit widget, it
 will share the same settings and internal subprocess as RELATED.
@@ -446,6 +450,29 @@ fails.  */)
 			    G_CALLBACK (run_file_chooser_cb),
 			    NULL);
         }
+      unblock_input ();
+    } else if (EQ (xw->type, Qglarea)) {
+      block_input ();
+
+      /* Create a window for GL context. */
+      xw->widgetwindow_osr = gtk_window_new (GTK_WINDOW_TOPLEVEL);
+      gtk_window_resize (GTK_WINDOW (xw->widgetwindow_osr), xw->width,
+                         xw->height);
+
+      xw->widget_osr = gtk_gl_area_new ();
+      gtk_widget_set_size_request (GTK_WIDGET (xw->widget_osr), xw->width,
+                                   xw->height);
+
+      gtk_container_add (GTK_CONTAINER (xw->widgetwindow_osr),
+                         GTK_WIDGET (GTK_GL_AREA (xw->widget_osr)));
+
+      gtk_widget_show_all (xw->widgetwindow_osr);
+      gtk_widget_hide (xw->widgetwindow_osr);
+
+      /* Store some xwidget data in the gtk widgets for convenient
+         retrieval in the event handlers.  */
+      g_object_set_data (G_OBJECT (xw->widget_osr), XG_XWIDGET, xw);
+      g_object_set_data (G_OBJECT (xw->widgetwindow_osr), XG_XWIDGET, xw);
 
       g_signal_connect (G_OBJECT (xw->widgetwindow_osr), "damage-event",
 			G_CALLBACK (offscreen_damage_event), xw);
@@ -2623,6 +2650,26 @@ webkit_decide_policy_cb (WebKitWebView *webView,
   }
 }
 
+static void glarea_render_frame(void) {
+  glClearColor(0.5, 0.5, 0.5, 1.0);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+  glOrtho(-1., 1., -1., 1., 1., 20.);
+
+  glMatrixMode(GL_MODELVIEW);
+  glLoadIdentity();
+  gluLookAt(0., 0., 10., 0., 0., 0., 0., 1., 0.);
+
+  glBegin(GL_QUADS);
+    glColor3f(1., 0., 0.); glVertex3f(-.75, -.75, 0.);
+    glColor3f(0., 1., 0.); glVertex3f( .75, -.75, 0.);
+    glColor3f(0., 0., 1.); glVertex3f( .75,  .75, 0.);
+    glColor3f(1., 1., 0.); glVertex3f(-.75,  .75, 0.);
+  glEnd();
+}
+
 static gboolean
 webkit_script_dialog_cb (WebKitWebView *webview,
 			 WebKitScriptDialog *script_dialog,
@@ -2693,6 +2740,38 @@ webkit_script_dialog_cb (WebKitWebView *webview,
 
   return TRUE;
 }
+
+/* For gtk3 offscreen rendered widgets.  */
+static gboolean
+xwidget_osr_draw_cb (GtkWidget *widget, cairo_t *cr, gpointer data)
+{
+  struct xwidget *xw = g_object_get_data (G_OBJECT (widget), XG_XWIDGET);
+  struct xwidget_view *xv = g_object_get_data (G_OBJECT (widget),
+                                               XG_XWIDGET_VIEW);
+
+  if (EQ (xw->type, Qglarea))
+    {
+      GdkWindow* xwin = gtk_widget_get_window (xw->widgetwindow_osr);
+      GdkWindow* xwin_widget = gtk_widget_get_window (xv->widget);
+      GLXContext glcontext = g_object_get_data (G_OBJECT (xv->widget),
+                                                XG_GL_CONTEXT);
+
+      if (glXMakeCurrent (GDK_WINDOW_XDISPLAY (xwin), GDK_WINDOW_XID (xwin_widget), glcontext))
+        {
+          glarea_render_frame();
+
+          glXSwapBuffers (GDK_WINDOW_XDISPLAY (xwin), GDK_WINDOW_XID (xwin_widget));
+        }
+
+      return TRUE;
+    }
+
+  cairo_rectangle (cr, 0, 0, xv->clip_right, xv->clip_bottom);
+  cairo_clip (cr);
+
+  gtk_widget_draw (xw->widget_osr, cr);
+  return FALSE;
+}
 #endif /* USE_GTK */
 
 
@@ -2720,6 +2799,45 @@ xwidget_init_view (struct xwidget *xww,
 
 #ifdef HAVE_X_WINDOWS
   xv->dpy = FRAME_X_DISPLAY (s->f);
+
+  if (EQ (xww->type, Qglarea))
+    {
+      xv->widget = gtk_drawing_area_new ();
+      /* Expose event handling.  */
+      gtk_widget_set_app_paintable (xv->widget, TRUE);
+      gtk_widget_add_events (xv->widget, GDK_ALL_EVENTS_MASK);
+
+      g_signal_connect (G_OBJECT (xv->widget), "draw",
+                        G_CALLBACK (xwidget_osr_draw_cb), NULL);
+
+      /* Create GL context. */
+      GdkWindow * xwin = gtk_widget_get_window (xww->widgetwindow_osr);
+      GLint attr_list[] = {GLX_DOUBLEBUFFER,
+                       GLX_RGBA,
+                       GLX_DEPTH_SIZE, 16,
+                       GLX_RED_SIZE,   8,
+                       GLX_GREEN_SIZE, 8,
+                       GLX_BLUE_SIZE,  8,
+                       None};
+      XVisualInfo * visualinfo = glXChooseVisual (GDK_WINDOW_XDISPLAY (xwin),
+                                                  gdk_screen_get_number (gdk_window_get_screen (xwin)),
+                                                  attr_list);
+      GLXContext glcontext = glXCreateContext (GDK_WINDOW_XDISPLAY (xwin),
+                                    visualinfo,
+                                    NULL,
+                                    TRUE);
+      xfree (visualinfo);
+      g_object_set_data (G_OBJECT (xv->widget), XG_GL_CONTEXT, glcontext);
+
+      /* Store some xwidget data in the gtk widget.  */
+      g_object_set_data (G_OBJECT (xv->widget), XG_XWIDGET, xww);
+      g_object_set_data (G_OBJECT (xv->widget), XG_XWIDGET_VIEW, xv);
+
+      gtk_container_add (GTK_CONTAINER (FRAME_GTK_WIDGET (s->f)), xv->widget);
+      gtk_widget_set_size_request (GTK_WIDGET (xv->widget), xww->width,
+                                   xww->height);
+      gtk_widget_show (xv->widget);
+    }
 
   xv->x = x;
   xv->y = y;
@@ -2821,6 +2939,19 @@ x_draw_xwidget_glyph_string (struct glyph_string *s)
   window_box (s->w, xv->area, &text_area_x, &text_area_y,
               &text_area_width, &text_area_height);
 
+  /* Resize xwidget webkit if its container window size is changed in
+     some ways, for example, a buffer became hidden in small split
+     window, then it can appear front in merged whole window.  */
+  if (EQ (xww->type, Qglarea)
+      && (xww->width != text_area_width || xww->height != text_area_height))
+    {
+      Lisp_Object xwl;
+      XSETXWIDGET (xwl, xww);
+      Fxwidget_resize (xwl,
+                       make_int (text_area_width),
+                       make_int (text_area_height));
+    }
+
   clip_left = max (0, text_area_x - x);
   clip_right = max (clip_left,
 		    min (xww->width, text_area_x + text_area_width - x));
@@ -2847,7 +2978,7 @@ x_draw_xwidget_glyph_string (struct glyph_string *s)
 
 #ifdef HAVE_X_WINDOWS
   block_input ();
-  if (xv->wdesc == None)
+  if (xv->wdesc == None && !EQ (xww->type, Qglarea))
     {
       Lisp_Object xvw;
       XSETXWIDGET_VIEW (xvw, xv);
@@ -2917,11 +3048,19 @@ x_draw_xwidget_glyph_string (struct glyph_string *s)
   if (moved)
     {
 #ifdef HAVE_X_WINDOWS
-      XMoveResizeWindow (xv->dpy, xv->wdesc, x + clip_left, y + clip_top,
-			 clip_right - clip_left, clip_bottom - clip_top);
-      XFlush (xv->dpy);
-      cairo_xlib_surface_set_size (xv->cr_surface, clip_right - clip_left,
-				   clip_bottom - clip_top);
+      if (!EQ (xww->type, Qglarea))
+        {
+          XMoveResizeWindow (xv->dpy, xv->wdesc, x + clip_left, y + clip_top,
+                             clip_right - clip_left, clip_bottom - clip_top);
+          XFlush (xv->dpy);
+          cairo_xlib_surface_set_size (xv->cr_surface, clip_right - clip_left,
+                                       clip_bottom - clip_top);
+        }
+      else
+        {
+          gtk_fixed_move (GTK_FIXED (FRAME_GTK_WIDGET (xv->frame)),
+                          xv->widget, x + clip_left, y + clip_top);
+        }
 #elif defined HAVE_PGTK
       gtk_widget_set_size_request (xv->widget, clip_right - clip_left,
 				   clip_bottom - clip_top);
@@ -2946,21 +3085,29 @@ x_draw_xwidget_glyph_string (struct glyph_string *s)
     {
 #ifdef USE_GTK
 #ifdef HAVE_X_WINDOWS
-      if (!wdesc_was_none && !moved)
+      if (!EQ (xww->type, Qglarea))
 	{
-	  if (clip_right - clip_left <= 0
-	      || clip_bottom - clip_top <= 0)
+	  if (!wdesc_was_none && !moved)
 	    {
-	      XUnmapWindow (xv->dpy, xv->wdesc);
-	      xv->hidden = true;
+	      if (clip_right - clip_left <= 0
+		  || clip_bottom - clip_top <= 0)
+		{
+		  XUnmapWindow (xv->dpy, xv->wdesc);
+		  xv->hidden = true;
+		}
+	      else
+		{
+		  XResizeWindow (xv->dpy, xv->wdesc, clip_right - clip_left,
+				 clip_bottom - clip_top);
+		}
+	      XFlush (xv->dpy);
+	      cairo_xlib_surface_set_size (xv->cr_surface, clip_right - clip_left,
+					   clip_bottom - clip_top);
 	    }
-	  else
-	    {
-	      XResizeWindow (xv->dpy, xv->wdesc, clip_right - clip_left,
-			     clip_bottom - clip_top);
-	    }
-	  XFlush (xv->dpy);
-	  cairo_xlib_surface_set_size (xv->cr_surface, clip_right - clip_left,
+	}
+      else
+	{
+	  gtk_widget_set_size_request (xv->widget, clip_right - clip_left,
 				       clip_bottom - clip_top);
 	}
 #else
@@ -2999,7 +3146,7 @@ x_draw_xwidget_glyph_string (struct glyph_string *s)
 	}
     }
 #ifdef HAVE_X_WINDOWS
-  else
+  else if (!EQ (xww->type, Qglarea))
     {
       XSetWindowBackground (xv->dpy, xv->wdesc,
 			    FRAME_BACKGROUND_PIXEL (s->f));
@@ -3229,6 +3376,47 @@ argument procedure FUN.*/)
   return Qnil;
 }
 
+static bool
+xwidget_is_glarea (struct xwidget *xw)
+{
+#ifdef USE_GTK
+  return xw->widget_osr != NULL && EQ (xw->type, Qglarea);
+#else
+  return false;
+#endif
+}
+
+/* Macro that checks xwidget hold glarea first.  */
+#define GLAREA_FN_INIT()						\
+  CHECK_XWIDGET (xwidget);						\
+  struct xwidget *xw = XXWIDGET (xwidget);				\
+  if (!xwidget_is_glarea (xw))					\
+    {									\
+      fputs ("ERROR xw->widget_osr does not hold a glarea instance\n",	\
+             stdout);							\
+      return Qnil;							\
+    }
+
+DEFUN ("xwidget-glarea-make-current", Fxwidget_glarea_make_current,
+       Sxwidget_glarea_make_current, 1, 1, 0,
+       doc: /* Make the GL context associated with XWIDGET current.  */ )
+    (Lisp_Object xwidget)
+{
+  GLAREA_FN_INIT();
+
+  struct xwidget_view *xv = g_object_get_data (G_OBJECT (xw->widget_osr),
+                                               XG_XWIDGET_VIEW);
+
+  GdkWindow* xwin = gtk_widget_get_window (xw->widgetwindow_osr);
+  GdkWindow* xwin_widget = gtk_widget_get_window (xv->widget);
+  GLXContext glcontext = g_object_get_data (G_OBJECT (xv->widget),
+                                                XG_GL_CONTEXT);
+
+  glXMakeCurrent (GDK_WINDOW_XDISPLAY (xwin), GDK_WINDOW_XID (xwin_widget), glcontext);
+
+  return Qnil;
+}
+
 DEFUN ("xwidget-resize", Fxwidget_resize, Sxwidget_resize, 3, 3, 0,
        doc: /* Resize XWIDGET to NEW_WIDTH, NEW_HEIGHT.  */ )
   (Lisp_Object xwidget, Lisp_Object new_width, Lisp_Object new_height)
@@ -3404,6 +3592,17 @@ DEFUN ("delete-xwidget-view",
       g_signal_handler_disconnect (xv->passive_grab,
 				   xv->passive_grab_drag_signal);
       xv->passive_grab = NULL;
+    }
+
+  if (EQ (xw->type, Qglarea) && xv->widget)
+    {
+      GLXContext glcontext = g_object_get_data (G_OBJECT (xv->widget),
+                                                XG_GL_CONTEXT);
+      if (glcontext)
+        glXDestroyContext (GDK_WINDOW_XDISPLAY (xw->widgetwindow_osr),
+                           glcontext);
+      gtk_widget_destroy (xv->widget);
+      xv->widget = NULL;
     }
 
 #else
@@ -3931,6 +4130,9 @@ syms_of_xwidget (void)
   defsubr (&Sxwidget_webkit_zoom);
   defsubr (&Sxwidget_webkit_execute_script);
   DEFSYM (Qwebkit, "webkit");
+
+  defsubr (&Sxwidget_glarea_make_current);
+  DEFSYM (Qglarea, "glarea");
 
   defsubr (&Sxwidget_size_request);
   defsubr (&Sdelete_xwidget_view);
