@@ -48,9 +48,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #ifdef HAVE_XINPUT2
 #include <X11/extensions/XInput2.h>
 #endif
-#include <epoxy/gl.h>
 #include <GL/glx.h>
-#include <GL/glu.h>
 #elif defined NS_IMPL_COCOA
 #include "nsxwidget.h"
 #endif
@@ -330,6 +328,17 @@ fails.  */)
   xw->find_text = NULL;
 
   Fputhash (make_fixnum (xw->xwidget_id), val, id_to_xwidget_map);
+
+  if (EQ (xw->type, Qglarea))
+    {
+      xw->init_func = Qnil;
+      xw->render_func = Qnil;
+
+      if (!NILP (arguments)) {
+        xw->init_func = Fplist_get(arguments, QCinit);
+        xw->render_func = Fplist_get(arguments, QCrender);
+      }
+    }
 
 #ifdef USE_GTK
   xw->widgetwindow_osr = NULL;
@@ -2649,26 +2658,6 @@ webkit_decide_policy_cb (WebKitWebView *webView,
   }
 }
 
-static void glarea_render_frame(void) {
-  glClearColor(0.5, 0.5, 0.5, 1.0);
-  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-  glMatrixMode(GL_PROJECTION);
-  glLoadIdentity();
-  glOrtho(-1., 1., -1., 1., 1., 20.);
-
-  glMatrixMode(GL_MODELVIEW);
-  glLoadIdentity();
-  gluLookAt(0., 0., 10., 0., 0., 0., 0., 1., 0.);
-
-  glBegin(GL_QUADS);
-    glColor3f(1., 0., 0.); glVertex3f(-.75, -.75, 0.);
-    glColor3f(0., 1., 0.); glVertex3f( .75, -.75, 0.);
-    glColor3f(0., 0., 1.); glVertex3f( .75,  .75, 0.);
-    glColor3f(1., 1., 0.); glVertex3f(-.75,  .75, 0.);
-  glEnd();
-}
-
 static gboolean
 webkit_script_dialog_cb (WebKitWebView *webview,
 			 WebKitScriptDialog *script_dialog,
@@ -2757,7 +2746,14 @@ xwidget_osr_draw_cb (GtkWidget *widget, cairo_t *cr, gpointer data)
 
       if (glXMakeCurrent (GDK_WINDOW_XDISPLAY (xwin), GDK_WINDOW_XID (xwin_widget), glcontext))
         {
-          glarea_render_frame();
+          if (!NILP (xw->init_func))
+            {
+              call0(xw->init_func);
+              xw->init_func = Qnil;
+            }
+
+          if (!NILP (xw->render_func))
+            call0(xw->render_func);
 
           glXSwapBuffers (GDK_WINDOW_XDISPLAY (xwin), GDK_WINDOW_XID (xwin_widget));
         }
@@ -2810,7 +2806,8 @@ xwidget_init_view (struct xwidget *xww,
                         G_CALLBACK (xwidget_osr_draw_cb), NULL);
 
       /* Create GL context. */
-      GdkWindow * xwin = gtk_widget_get_window (xww->widgetwindow_osr);
+      GdkWindow* xwin = gtk_widget_get_window (xww->widgetwindow_osr);
+
       GLint attr_list[] = {GLX_DOUBLEBUFFER,
                        GLX_RGBA,
                        GLX_DEPTH_SIZE, 16,
@@ -2822,9 +2819,9 @@ xwidget_init_view (struct xwidget *xww,
                                                   gdk_screen_get_number (gdk_window_get_screen (xwin)),
                                                   attr_list);
       GLXContext glcontext = glXCreateContext (GDK_WINDOW_XDISPLAY (xwin),
-                                    visualinfo,
-                                    NULL,
-                                    TRUE);
+                                               visualinfo,
+                                               NULL,
+                                               TRUE);
       xfree (visualinfo);
       g_object_set_data (G_OBJECT (xv->widget), XG_GL_CONTEXT, glcontext);
 
@@ -4132,6 +4129,8 @@ syms_of_xwidget (void)
 
   defsubr (&Sxwidget_glarea_make_current);
   DEFSYM (Qglarea, "glarea");
+  DEFSYM (QCinit, ":init");
+  DEFSYM (QCrender, ":render");
 
   defsubr (&Sxwidget_size_request);
   defsubr (&Sdelete_xwidget_view);
