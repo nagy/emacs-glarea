@@ -334,12 +334,14 @@ fails.  */)
       xw->render_func = Qnil;
       xw->cursor_pos_cb = Qnil;
       xw->mouse_button_cb = Qnil;
+      xw->private_data = Qnil;
 
       if (!NILP (arguments)) {
         xw->init_func = Fplist_get(arguments, QCinit);
         xw->render_func = Fplist_get(arguments, QCrender);
         xw->cursor_pos_cb = Fplist_get(arguments, QCcursor_pos);
         xw->mouse_button_cb = Fplist_get(arguments, QCmouse_button);
+        xw->private_data = Fplist_get(arguments, QCprivate);
       }
     }
 
@@ -2773,12 +2775,12 @@ xwidget_osr_draw_cb (GtkWidget *widget, cairo_t *cr, gpointer data)
         {
           if (!NILP (xw->init_func))
             {
-              call2 (xw->init_func, make_fixed_natnum (xw->width), make_fixed_natnum (xw->height));
+              call3 (xw->init_func, make_fixed_natnum (xw->width), make_fixed_natnum (xw->height), xw->private_data);
               xw->init_func = Qnil;
             }
 
           if (!NILP (xw->render_func))
-            call0 (xw->render_func);
+            call1 (xw->render_func, xw->private_data);
 
           glXSwapBuffers (GDK_WINDOW_XDISPLAY (xwin), GDK_WINDOW_XID (xwin_widget));
         }
@@ -2816,7 +2818,7 @@ glarea_button_event_cb (GtkWidget      *widget,
           break;
         }
 
-      call2 (xw->mouse_button_cb, make_int(event->button), action);
+      call3 (xw->mouse_button_cb, make_int(event->button), action, xw->private_data);
     }
 
   return TRUE;
@@ -2831,7 +2833,7 @@ glarea_motion_notify_event_cb (GtkWidget      *widget,
 
   if (!NILP (xw->cursor_pos_cb))
     {
-      call2 (xw->cursor_pos_cb, make_fixed_natnum (event->x), make_fixed_natnum (event->y));
+      call3 (xw->cursor_pos_cb, make_fixed_natnum (event->x), make_fixed_natnum (event->y), xw->private_data);
     }
 
   return TRUE;
@@ -4234,6 +4236,7 @@ syms_of_xwidget (void)
   DEFSYM (QCrender, ":render");
   DEFSYM (QCcursor_pos, ":cursor-pos");
   DEFSYM (QCmouse_button, ":mouse-button");
+  DEFSYM (QCprivate, ":private");
 
   defsubr (&Sxwidget_size_request);
   defsubr (&Sdelete_xwidget_view);
