@@ -132,6 +132,9 @@ struct xwidget_view
   Display *dpy;
   Window wdesc;
 
+  /* GTK widget embedded in the frame; used by glarea views.  */
+  GtkWidget *widget;
+
   GdkWindow *last_crossing_window;
   guint last_crossing_cursor_signal;
   GtkWidget *passive_grab;
