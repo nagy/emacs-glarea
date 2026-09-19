@@ -338,11 +338,11 @@ fails.  */)
       xw->private_data = Qnil;
 
       if (!NILP (arguments)) {
-        xw->init_func = Fplist_get(arguments, QCinit);
-        xw->render_func = Fplist_get(arguments, QCrender);
-        xw->cursor_pos_cb = Fplist_get(arguments, QCcursor_pos);
-        xw->mouse_button_cb = Fplist_get(arguments, QCmouse_button);
-        xw->private_data = Fplist_get(arguments, QCprivate);
+        xw->init_func = Fplist_get (arguments, QCinit, Qnil);
+        xw->render_func = Fplist_get (arguments, QCrender, Qnil);
+        xw->cursor_pos_cb = Fplist_get (arguments, QCcursor_pos, Qnil);
+        xw->mouse_button_cb = Fplist_get (arguments, QCmouse_button, Qnil);
+        xw->private_data = Fplist_get (arguments, QCprivate, Qnil);
       }
     }
 
@@ -2779,12 +2779,12 @@ xwidget_osr_draw_cb (GtkWidget *widget, cairo_t *cr, gpointer data)
         {
           if (!NILP (xw->init_func))
             {
-              call3 (xw->init_func, make_fixed_natnum (xw->width), make_fixed_natnum (xw->height), xw->private_data);
+              calln (xw->init_func, make_fixed_natnum (xw->width), make_fixed_natnum (xw->height), xw->private_data);
               xw->init_func = Qnil;
             }
 
           if (!NILP (xw->render_func))
-            call1 (xw->render_func, xw->private_data);
+            calln (xw->render_func, xw->private_data);
 
           glXSwapBuffers (GDK_WINDOW_XDISPLAY (xwin), GDK_WINDOW_XID (xwin_widget));
         }
@@ -2826,7 +2826,7 @@ glarea_button_event_cb (GtkWidget      *widget,
         }
 
       set_buffer_internal (buf);
-      call3 (xw->mouse_button_cb, make_int(event->button), action, xw->private_data);
+      calln (xw->mouse_button_cb, make_int(event->button), action, xw->private_data);
       set_buffer_internal (old);
     }
 
@@ -2844,7 +2844,7 @@ glarea_motion_notify_event_cb (GtkWidget      *widget,
   if (!NILP (xw->cursor_pos_cb))
     {
       set_buffer_internal (buf);
-      call3 (xw->cursor_pos_cb, make_fixed_natnum (event->x), make_fixed_natnum (event->y), xw->private_data);
+      calln (xw->cursor_pos_cb, make_fixed_natnum (event->x), make_fixed_natnum (event->y), xw->private_data);
       set_buffer_internal (old);
     }
 
@@ -3571,7 +3571,8 @@ DEFUN ("xwidget-queue-redraw", Fxwidget_queue_redraw, Sxwidget_queue_redraw, 1, 
           if (XXWIDGET (xv->model) == xw)
             {
 #ifdef USE_GTK
-              gtk_widget_queue_draw (xv->widget);
+              if (xv->widget)
+                gtk_widget_queue_draw (xv->widget);
 #endif
             }
         }
@@ -3707,7 +3708,8 @@ DEFUN ("delete-xwidget-view",
       GLXContext glcontext = g_object_get_data (G_OBJECT (xv->widget),
                                                 XG_GL_CONTEXT);
       if (glcontext)
-        glXDestroyContext (GDK_WINDOW_XDISPLAY (xw->widgetwindow_osr),
+        glXDestroyContext (GDK_WINDOW_XDISPLAY (gtk_widget_get_window
+                                                (xw->widgetwindow_osr)),
                            glcontext);
       gtk_widget_destroy (xv->widget);
       xv->widget = NULL;
